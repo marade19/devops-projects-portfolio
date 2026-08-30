@@ -1,0 +1,17 @@
+# Build output
+Java-Login-App/target/
+*.war
+*.class
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+
+# Credentials / backups
+*.backup
+*.pem
+*.key
