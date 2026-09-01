@@ -1,0 +1,55 @@
+pipeline {
+    agent any
+
+    tools {
+        jdk 'jdk21'
+        maven 'maven3'
+    }
+
+    environment {
+        SONAR_TOKEN = credentials('sonarcloud-token')
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                git branch: 'main',
+                    url: 'https://github.com/marade19/devops-projects-portfolio.git',
+                    credentialsId: 'github-credentials'
+            }
+        }
+
+        stage('Build') {
+            steps {
+                dir('DevOps-Project-01/Java-Login-App') {
+                    sh 'mvn clean package'
+                }
+            }
+        }
+
+        stage('SonarCloud Analysis') {
+            steps {
+                dir('DevOps-Project-01/Java-Login-App') {
+                    sh '''
+                        mvn sonar:sonar \
+                          -Dsonar.token=$SONAR_TOKEN \
+                          -Dsonar.host.url=https://sonarcloud.io
+                    '''
+                }
+            }
+        }
+
+        // Deploy stages (S3 upload + ASG refresh) added here once AWS
+        // infrastructure is back up — see BUILD-LOG.md / scripts/ for
+        // the manual commands these will eventually replace.
+    }
+
+    post {
+        success {
+            echo 'Build and analysis completed successfully.'
+        }
+        failure {
+            echo 'Pipeline failed — check the stage logs above.'
+        }
+    }
+}

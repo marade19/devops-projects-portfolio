@@ -17,8 +17,8 @@
 
 	<properties>
 		<java.version>11</java.version>
-                <sonar.projectKey>your_project_key</sonar.projectKey>
-                <sonar.organization>your_organization</sonar.organization>
+                <sonar.projectKey>marade19_devops-projects-portfolio</sonar.projectKey>
+                <sonar.organization>marade19</sonar.organization>
                 <sonar.host.url>https://sonarcloud.io</sonar.host.url>
 	</properties>
 
