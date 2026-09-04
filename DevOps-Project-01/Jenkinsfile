@@ -32,7 +32,7 @@ pipeline {
             steps {
                 dir('DevOps-Project-01/Java-Login-App') {
                     sh '''
-                        mvn sonar:sonar \
+                        mvn org.sonarsource.scanner.maven:sonar-maven-plugin:sonar \
                           -Dsonar.token=$SONAR_TOKEN \
                           -Dsonar.host.url=https://sonarcloud.io
                     '''
