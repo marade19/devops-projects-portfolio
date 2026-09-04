@@ -8,6 +8,7 @@ pipeline {
 
     environment {
         SONAR_TOKEN = credentials('sonarcloud-token')
+        DB_PASSWORD = credentials('db-password')
     }
 
     stages {
@@ -22,12 +23,10 @@ pipeline {
         stage('Build') {
             steps {
                 dir('DevOps-Project-01/Java-Login-App') {
-                    withCredentials([string(credentialsId: 'db-password', variable: 'DB_PASSWORD')]) {  
                     sh 'mvn clean package'
                 }
-           }
-       }
-   }
+            }
+        }
 
         stage('SonarCloud Analysis') {
             steps {
