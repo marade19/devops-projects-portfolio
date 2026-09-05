@@ -1,0 +1,4 @@
+# Rebuild-generated files (secrets / local state — not source of truth)
+*.env
+tomcat-userdata-runtime.sh
+nginx-userdata-runtime.sh
