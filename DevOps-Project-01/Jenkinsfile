@@ -7,8 +7,12 @@ pipeline {
     }
 
     environment {
-        SONAR_TOKEN = credentials('sonarcloud-token')
-        DB_PASSWORD = credentials('db-password')
+        SONAR_TOKEN        = credentials('sonarcloud-token')
+        DB_PASSWORD        = credentials('db-password')
+        AWS_DEFAULT_REGION = 'us-east-1'
+        BUCKET_NAME        = 'devopsproject01-artifacts-641867104188'
+        TOMCAT_ASG         = 'TomcatASG'
+        PUBLIC_NLB_DNS     = 'PublicNLB-5042d6d8d71297ea.elb.us-east-1.amazonaws.com'
     }
 
     stages {
@@ -40,14 +44,77 @@ pipeline {
             }
         }
 
-        // Deploy stages (S3 upload + ASG refresh) added here once AWS
-        // infrastructure is back up — see BUILD-LOG.md / scripts/ for
-        // the manual commands these will eventually replace.
+        stage('Upload Artifact to S3') {
+            steps {
+                dir('DevOps-Project-01/Java-Login-App') {
+                    withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']]) {
+                        sh '''
+                            aws s3 cp target/dptweb-1.0.war s3://$BUCKET_NAME/dptweb-1.0.war --region $AWS_DEFAULT_REGION
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Deploy - ASG Instance Refresh') {
+            steps {
+                timeout(time: 15, unit: 'MINUTES') {
+                    withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']]) {
+                        sh '''
+                            REFRESH_ID=$(aws autoscaling start-instance-refresh \
+                              --auto-scaling-group-name $TOMCAT_ASG \
+                              --preferences '{"MinHealthyPercentage":0,"InstanceWarmup":300}' \
+                              --region $AWS_DEFAULT_REGION \
+                              --query 'InstanceRefreshId' --output text)
+                            echo "Started instance refresh: $REFRESH_ID"
+
+                            while true; do
+                              STATUS=$(aws autoscaling describe-instance-refreshes \
+                                --auto-scaling-group-name $TOMCAT_ASG \
+                                --instance-refresh-ids $REFRESH_ID \
+                                --region $AWS_DEFAULT_REGION \
+                                --query 'InstanceRefreshes[0].Status' --output text)
+                              echo "Refresh status: $STATUS"
+
+                              if [ "$STATUS" = "Successful" ]; then
+                                echo "Instance refresh completed successfully."
+                                break
+                              elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "Cancelled" ]; then
+                                echo "Instance refresh failed or was cancelled."
+                                exit 1
+                              fi
+                              sleep 15
+                            done
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Verify Deployment') {
+            steps {
+                sh '''
+                    echo "Waiting for the frontend to reflect the new deploy..."
+                    sleep 30
+                    for i in $(seq 1 6); do
+                      HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://$PUBLIC_NLB_DNS/ || echo "000")
+                      echo "Attempt $i: HTTP $HTTP_CODE"
+                      if [ "$HTTP_CODE" = "200" ]; then
+                        echo "Deployment verified — app is responding."
+                        exit 0
+                      fi
+                      sleep 15
+                    done
+                    echo "App did not return HTTP 200 after retries."
+                    exit 1
+                '''
+            }
+        }
     }
 
     post {
         success {
-            echo 'Build and analysis completed successfully.'
+            echo 'Build, analysis, and deployment completed successfully.'
         }
         failure {
             echo 'Pipeline failed — check the stage logs above.'
