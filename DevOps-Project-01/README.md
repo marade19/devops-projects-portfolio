@@ -1,26 +1,7 @@
-# Deploy Java Application on AWS 3-Tier Architecture
+# # DevOps Project 01 — Java Login App: Multi-Tier AWS Deployment with Jenkins CI/CD
 
 ![AWS Architecture](https://imgur.com/b9iHwVc.png)
 
-## Table of Contents
-
-1. [Project Overview](#project-overview)
-2. [Architecture Overview](#architecture-overview)
-3. [Pre-Requisites](#pre-requisites)
-4. [Infrastructure Setup](#infrastructure-setup)
-   - [VPC and Networking](#vpc-and-networking)
-   - [Security Configuration](#security-configuration)
-   - [Database Layer](#database-layer)
-5. [Application Setup](#application-setup)
-   - [Build Environment](#build-environment)
-   - [Application Deployment](#application-deployment)
-   - [Load Balancing and Auto Scaling](#load-balancing-and-auto-scaling)
-6. [Monitoring and Maintenance](#monitoring-and-maintenance)
-7. [Security Best Practices](#security-best-practices)
-8. [Troubleshooting Guide](#troubleshooting-guide)
-9. [Contributing](#contributing)
-
----
 
 ![3-tier Architecture Diagram](https://imgur.com/3XF0tlJ.png)
 
@@ -39,34 +20,6 @@ This project demonstrates the deployment of a production-grade Java web applicat
 - **Security**: Defense-in-depth approach with multiple security layers
 - **Monitoring**: Comprehensive logging and monitoring setup
 - **Cost Optimization**: Efficient resource utilization and management
-
-## Architecture Overview
-
-### Infrastructure Components
-
-1. **Presentation Tier (Frontend)**
-   - Nginx web servers in Auto Scaling Group
-   - Public-facing Network Load Balancer
-   - CloudFront Distribution for static content
-
-2. **Application Tier (Backend)**
-   - Apache Tomcat servers in Auto Scaling Group
-   - Internal Network Load Balancer
-   - Session management with Amazon ElastiCache
-
-3. **Data Tier**
-   - Amazon RDS MySQL in Multi-AZ configuration
-   - Automated backups and point-in-time recovery
-   - Read replicas for read-heavy workloads
-
-### Network Architecture
-
-- **VPC Design**
-  - Two separate VPCs (192.168.0.0/16 and 172.32.0.0/16)
-  - Public and private subnets across multiple AZs
-  - Transit Gateway for inter-VPC communication
-
-# Pre-Requisites
 
 ## Required Accounts and Tools
 
@@ -126,421 +79,265 @@ This project demonstrates the deployment of a production-grade Java web applicat
     </servers>
     ```
 
-# Infrastructure Setup
+End-to-end DevOps pipeline that builds, scans, and deploys a Java (Spring Boot/Tomcat) login application onto a multi-tier, multi-VPC AWS architecture — fully automated with Jenkins, SonarCloud, S3, and an Auto Scaling Group.
 
-## VPC and Networking
+---
 
-### 1. VPC Creation
+## 📐 Architecture Overview
+
+Two VPCs (primary and secondary) connected via a Transit Gateway, with a public-facing frontend tier, a private application tier running Tomcat behind an Auto Scaling Group, and an RDS database. Build artifacts are shipped through S3, and deployments are rolled out via ASG Instance Refresh.
+
+![DevOps Project 01 3D architecture diagram](./architecture-3d.svg)
+
+**Traffic flow:** Internet → Public NLB → NGINX (frontend tier) → Tomcat app tier (ASG) → RDS.
+**Deployment flow:** Jenkins builds the WAR → uploads it to S3 → triggers an ASG Instance Refresh → new instances pull the latest artifact on boot (via user-data) → Jenkins verifies the app responds with HTTP 200 through the NLB.
+
+---
+
+## 🧰 Tech Stack
+
+| Layer            | Tool / Service                                   |
+|-------------------|--------------------------------------------------|
+| Source control     | GitHub                                            |
+| CI/CD              | Jenkins (Declarative Pipeline)                    |
+| Build              | Maven, JDK 21                                     |
+| Code quality       | SonarCloud                                        |
+| Artifact storage   | Amazon S3                                         |
+| Compute            | EC2 Auto Scaling Groups (frontend: NGINX, app: Tomcat) |
+| Database           | Amazon RDS                                        |
+| Networking         | Two VPCs + Transit Gateway, public/private subnets |
+| Load balancing     | Network Load Balancer (public-facing)             |
+| Provisioning       | Bash + AWS CLI scripts (no Terraform)             |
+
+---
+
+## 📁 Repository Structure
+
+```
+DevOps-Project-01/
+├── Java-Login-App/                     # Spring Boot / Java source, builds to dptweb-1.0.war
+├── Jenkinsfile                         # CI/CD pipeline definition
+└── scripts/
+    ├── 01-networking-primary-vpc.sh    # Primary VPC, subnets, IGW/NAT
+    ├── 02-networking-secondary-vpc.sh  # Secondary VPC, subnets
+    ├── 03-transit-gateway.sh           # Transit Gateway creation
+    ├── 03-transit-gateway-continue.sh  # TGW attachments / route table updates
+    ├── 04-security-groups.sh           # Security groups (frontend, app, db)
+    ├── 05-rds.sh                       # RDS instance + subnet group
+    ├── 06-frontend-tier.sh             # NGINX ASG + Launch Template + NLB
+    ├── 07-app-tier.sh                  # Tomcat ASG + Launch Template
+    ├── 08-init-db.sh                   # DB schema/user initialization
+    ├── 09-verify-db.sh                 # DB connectivity check
+    ├── nginx-userdata.sh / nginx-userdata-runtime.sh
+    ├── tomcat-userdata.sh / tomcat-userdata-runtime.sh
+    ├── cleanup-duplicate-vpc.sh / cleanup-duplicate-vpc-part2.sh
+    └── *.env                           # Captured resource IDs per stage (VPC IDs, SG IDs, etc.)
+```
+
+Each `NN-*.sh` script writes the IDs of the resources it creates into a matching `*.env` file (e.g. `primary-vpc.env`, `security-groups.env`, `rds.env`). Later scripts and the teardown script source these files instead of hardcoding IDs.
+
+---
+
+## 🚀 Step-by-Step: Building the Infrastructure
+
+Run the scripts **in numeric order** from the `scripts/` directory. Each step depends on IDs exported by the previous one.
+
+### Step 1 — Primary VPC networking
 ```bash
-# Create primary VPC
-aws ec2 create-vpc \
-    --cidr-block 192.168.0.0/16 \
-    --tag-specifications 'ResourceType=vpc,Tags=[{Key=Name,Value=PrimaryVPC}]' \
-    --region us-east-1
-
-# Create secondary VPC
-aws ec2 create-vpc \
-    --cidr-block 172.32.0.0/16 \
-    --tag-specifications 'ResourceType=vpc,Tags=[{Key=Name,Value=SecondaryVPC}]' \
-    --region us-east-1
+./01-networking-primary-vpc.sh
 ```
+Creates the primary VPC, public and private subnets, Internet Gateway, NAT Gateway, and route tables. Resource IDs are saved to `primary-vpc.env`.
 
-### 2. Subnet Configuration
+### Step 2 — Secondary VPC networking
 ```bash
-# Create public subnet
-aws ec2 create-subnet \
-    --vpc-id vpc-xxx \
-    --cidr-block 192.168.1.0/24 \
-    --availability-zone us-east-1a \
-    --tag-specifications 'ResourceType=subnet,Tags=[{Key=Name,Value=PublicSubnet1}]'
-
-# Create private subnet
-aws ec2 create-subnet \
-    --vpc-id vpc-xxx \
-    --cidr-block 192.168.2.0/24 \
-    --availability-zone us-east-1b \
-    --tag-specifications 'ResourceType=subnet,Tags=[{Key=Name,Value=PrivateSubnet1}]'
+./02-networking-secondary-vpc.sh
 ```
+Creates the secondary VPC and its subnets, saved to `secondary-vpc.env`.
 
-### 3. Gateway Setup
+### Step 3 — Transit Gateway
 ```bash
-# Create and attach Internet Gateway
-aws ec2 create-internet-gateway
-aws ec2 attach-internet-gateway --vpc-id vpc-xxx --internet-gateway-id igw-xxx
-
-# Create NAT Gateway
-aws ec2 create-nat-gateway \
-    --subnet-id subnet-xxx \
-    --allocation-id eipalloc-xxx \
-    --tag-specifications 'ResourceType=natgateway,Tags=[{Key=Name,Value=PrimaryNATGateway}]'
+./03-transit-gateway.sh
+./03-transit-gateway-continue.sh
 ```
+Provisions the Transit Gateway, attaches both VPCs, and updates route tables so the primary and secondary VPCs can route to each other. Output saved to `transit-gateway.env`.
 
-## Security Configuration
-
-### 1. Security Groups
+### Step 4 — Security groups
 ```bash
-# Create frontend security group
-aws ec2 create-security-group \
-    --group-name FrontendSG \
-    --description "Security group for frontend servers" \
-    --vpc-id vpc-xxx
-
-# Allow inbound HTTP/HTTPS
-aws ec2 authorize-security-group-ingress \
-    --group-id sg-xxx \
-    --protocol tcp \
-    --port 80 \
-    --cidr 0.0.0.0/0
-
-aws ec2 authorize-security-group-ingress \
-    --group-id sg-xxx \
-    --protocol tcp \
-    --port 443 \
-    --cidr 0.0.0.0/0
+./04-security-groups.sh
 ```
+Creates the security groups for the frontend tier, app tier, and database tier, saved to `security-groups.env`.
 
-### 2. IAM Roles and Policies
-```json
-{
-    "Version": "2012-10-17",
-    "Statement": [
-        {
-            "Effect": "Allow",
-            "Action": [
-                "s3:GetObject",
-                "s3:PutObject"
-            ],
-            "Resource": "arn:aws:s3:::your-bucket/*"
-        }
-    ]
-}
-```
-
-## Database Layer
-
-### 1. RDS Instance Creation
+### Step 5 — RDS database
 ```bash
-aws rds create-db-instance \
-    --db-instance-identifier prod-mysql \
-    --db-instance-class db.t3.medium \
-    --engine mysql \
-    --master-username admin \
-    --master-user-password "YourSecurePassword" \
-    --allocated-storage 20 \
-    --multi-az \
-    --vpc-security-group-ids sg-xxx \
-    --db-subnet-group-name your-db-subnet-group
+./05-rds.sh
 ```
+Provisions the RDS instance and its DB subnet group, saved to `rds.env`.
 
-### 2. Database Initialization
-```sql
--- Connect to database
-mysql -h your-rds-endpoint -u admin -p
-
--- Create application database
-CREATE DATABASE javaapp;
-USE javaapp;
-
--- Create users table
-CREATE TABLE users (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    username VARCHAR(50) NOT NULL UNIQUE,
-    password VARCHAR(255) NOT NULL,
-    email VARCHAR(100) NOT NULL UNIQUE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- Create necessary indexes
-CREATE INDEX idx_username ON users(username);
-CREATE INDEX idx_email ON users(email);
-```
-
-# Application Setup
-
-## Build Environment
-
-### 1. Maven Configuration
-```xml
-<!-- pom.xml -->
-<project>
-    <properties>
-        <java.version>11</java.version>
-        <spring.version>2.5.12</spring.version>
-    </properties>
-    
-    <dependencies>
-        <!-- Add your dependencies here -->
-    </dependencies>
-    
-    <build>
-        <plugins>
-            <plugin>
-                <groupId>org.springframework.boot</groupId>
-                <artifactId>spring-boot-maven-plugin</artifactId>
-            </plugin>
-        </plugins>
-    </build>
-</project>
-```
-
-### 2. Build Process
+### Step 6 — Frontend tier (NGINX)
 ```bash
-# Clean and build project
-mvn clean package -DskipTests
-
-# Run tests
-mvn test
-
-# Deploy to JFrog
-mvn deploy
+./06-frontend-tier.sh
 ```
+Creates the NGINX Launch Template (using `nginx-userdata.sh` / `nginx-userdata-runtime.sh`), the frontend Auto Scaling Group, and the public Network Load Balancer. Saved to `frontend-tier.env`.
 
-## Application Deployment
-
-### 1. Tomcat Configuration
+### Step 7 — App tier (Tomcat)
 ```bash
-# Create tomcat.service
-sudo tee /etc/systemd/system/tomcat.service << EOF
-[Unit]
-Description=Apache Tomcat Web Application Container
-After=network.target
-
-[Service]
-Type=forking
-Environment=JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
-Environment=CATALINA_PID=/opt/tomcat/temp/tomcat.pid
-Environment=CATALINA_HOME=/opt/tomcat
-Environment=CATALINA_BASE=/opt/tomcat
-Environment='CATALINA_OPTS=-Xms512M -Xmx1024M -server -XX:+UseParallelGC'
-Environment='JAVA_OPTS=-Djava.awt.headless=true -Djava.security.egd=file:/dev/./urandom'
-
-ExecStart=/opt/tomcat/bin/startup.sh
-ExecStop=/opt/tomcat/bin/shutdown.sh
-
-User=tomcat
-Group=tomcat
-UMask=0007
-RestartSec=10
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-EOF
+./07-app-tier.sh
 ```
+Creates the Tomcat Launch Template (using `tomcat-userdata.sh` / `tomcat-userdata-runtime.sh`) and the app-tier Auto Scaling Group (`TomcatASG`) that ultimately runs the deployed `.war`. Saved to `app-tier.env`.
 
-### 2. Nginx Configuration
-```nginx
-# /etc/nginx/conf.d/app.conf
-upstream backend {
-    server internal-nlb-xxx.elb.amazonaws.com:8080;
-}
-
-server {
-    listen 80;
-    server_name example.com;
-
-    location / {
-        proxy_pass http://backend;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-
-    location /static/ {
-        proxy_pass https://your-cloudfront-distribution.cloudfront.net;
-    }
-}
-```
-
-## Load Balancing and Auto Scaling
-
-### 1. Launch Template Configuration
+### Step 8 — Initialize the database
 ```bash
-aws ec2 create-launch-template \
-    --launch-template-name WebServerTemplate \
-    --version-description WebServerVersion1 \
-    --launch-template-data '{
-        "ImageId": "ami-xxx",
-        "InstanceType": "t3.micro",
-        "SecurityGroupIds": ["sg-xxx"],
-        "UserData": "IyEvYmluL2Jhc2gKCiMgSW5zdGFsbCBOZ2lueApzdWRvIHl1bSBpbnN0YWxsIG5naW54IC15Cg=="
-    }'
+./08-init-db.sh
+```
+Connects to RDS and applies the schema/seed data the Java Login App needs (e.g. the `users` table, `db-password` credential used by the app).
+
+### Step 9 — Verify database connectivity
+```bash
+./09-verify-db.sh
+```
+Sanity-checks that the app tier can reach RDS before you start deploying application code.
+
+> If you ever end up with duplicate/orphaned VPC resources from a re-run, `cleanup-duplicate-vpc.sh` and `cleanup-duplicate-vpc-part2.sh` remove them safely.
+
+---
+
+## 🔁 CI/CD Pipeline (Jenkinsfile)
+
+The Jenkins pipeline lives at `DevOps-Project-01/Jenkinsfile` and runs six stages:
+
+1. **Checkout** — pulls `main` from `https://github.com/marade19/devops-projects-portfolio.git` using the `github-credentials` credential.
+2. **Build** — runs `mvn clean package` inside `DevOps-Project-01/Java-Login-App`, producing `target/dptweb-1.0.war`.
+3. **SonarCloud Analysis** — runs the Sonar Maven plugin against the `marade19` SonarCloud organization using the `sonarcloud-token` credential.
+4. **Upload Artifact to S3** — uploads `dptweb-1.0.war` to the S3 bucket defined in `BUCKET_NAME`, authenticated via the `aws-credentials` Jenkins credential (must be of **kind "AWS Credentials"**, not "Username with password" — see Gotchas below).
+5. **Deploy - ASG Instance Refresh** — starts an `aws autoscaling start-instance-refresh` against `TOMCAT_ASG`, then polls `describe-instance-refreshes` every 15 seconds until the refresh reports `Successful` (or fails/cancels the build if it doesn't).
+6. **Verify Deployment** — waits 30 seconds, then curls `PUBLIC_NLB_DNS` up to 6 times (15s apart) checking for an HTTP 200 response before marking the pipeline green.
+
+### Required Jenkins credentials
+
+| Credential ID       | Kind                     | Used for                          |
+|----------------------|--------------------------|------------------------------------|
+| `github-credentials`  | Username/password or PAT | Checking out the repo             |
+| `sonarcloud-token`    | Secret text              | Authenticating to SonarCloud       |
+| `db-password`         | Secret text              | App's database password            |
+| `aws-credentials`     | **AWS Credentials**      | S3 upload + ASG instance refresh   |
+
+### Required environment values (top of Jenkinsfile)
+
+```groovy
+AWS_DEFAULT_REGION = 'us-east-1'
+BUCKET_NAME        = '<your-artifact-bucket>'
+TOMCAT_ASG         = '<your-app-tier-asg-name>'
+PUBLIC_NLB_DNS     = '<your-public-nlb-dns-name>'
+```
+Get the ASG name with:
+```bash
+aws autoscaling describe-auto-scaling-groups \
+  --query "AutoScalingGroups[*].AutoScalingGroupName" --output table
 ```
 
-### 2. Auto Scaling Group
+### Running the pipeline
+1. Update the four environment values above and the `aws-credentials` withCredentials blocks in the Jenkinsfile.
+2. Commit and push:
+   ```bash
+   git add DevOps-Project-01/Jenkinsfile
+   git commit -m "Add S3 upload and ASG refresh stages"
+   git push origin main
+   ```
+3. In Jenkins: open `devops-project-01-pipeline` → **Build Now** → watch **Console Output**.
+
+### Gotchas learned the hard way
+- **Credential type mismatch**: `ERROR: Credentials 'aws-credentials' is of type 'Username with password' where 'AmazonWebServicesCredentials' was expected` means the credential was created as the wrong kind. Recreate it in Jenkins as kind **AWS Credentials** with the same ID so you don't need to touch the Jenkinsfile.
+- The `withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: '...']])` block only works with that AWS Credentials kind — it will not accept Secret text or Username/password credentials.
+- If you'd rather store the key pair as two Secret text credentials (`aws-access-key-id` / `aws-secret-access-key`), skip `withCredentials` entirely and export them directly in the `environment {}` block — the AWS CLI picks them up automatically.
+
+---
+
+## ✅ Verifying a Deployment Manually
+
 ```bash
-aws autoscaling create-auto-scaling-group \
-    --auto-scaling-group-name WebServerASG \
-    --launch-template LaunchTemplateName=WebServerTemplate,Version='$Latest' \
-    --min-size 2 \
-    --max-size 6 \
-    --desired-capacity 2 \
-    --vpc-zone-identifier "subnet-xxx,subnet-yyy" \
-    --target-group-arns "arn:aws:elasticloadbalancing:region:account-id:targetgroup/your-target-group/xxx" \
-    --health-check-type ELB \
-    --health-check-grace-period 300
+curl -s -o /dev/null -w "%{http_code}\n" http://<PUBLIC_NLB_DNS>/
 ```
+A `200` confirms the frontend tier is reachable and serving the app end-to-end through NGINX → Tomcat → RDS.
 
-# Monitoring and Maintenance
+---
 
-## CloudWatch Setup
+## 🧹 Tearing Down the Infrastructure
 
-### 1. Metrics Configuration
+Because this project is built with plain scripts (no Terraform), teardown is also script-driven. Delete resources in this order to avoid dependency errors — top of the stack down to networking:
+
+1. **Auto Scaling Groups** (frontend + app tier) — deleting these terminates their EC2 instances.
+2. **Launch Templates** for both tiers.
+3. **Load Balancer + Target Groups** (public NLB).
+4. **RDS instance + DB subnet group.**
+5. **Transit Gateway attachments**, then the **Transit Gateway** itself.
+6. **Security groups** (frontend, app, db).
+7. **NAT Gateways, Internet Gateways, Elastic IPs.**
+8. **Subnets and both VPCs** (secondary first, then primary).
+9. **S3 bucket** — empty it before deleting.
+
+### Automated teardown script
+
 ```bash
-# Create custom metric for memory usage
-cat << EOF > /opt/aws/scripts/memory-metrics.sh
 #!/bin/bash
-MEMORY_USAGE=\$(free | grep Mem | awk '{print \$3/\$2 * 100.0}')
-aws cloudwatch put-metric-data \
-    --metric-name MemoryUsage \
-    --namespace CustomMetrics \
-    --value \$MEMORY_USAGE \
-    --dimensions InstanceId=\$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
-EOF
+set -e
 
-# Add to crontab
-echo "* * * * * /opt/aws/scripts/memory-metrics.sh" | crontab -
+AWS_REGION="us-east-1"
+ASG_NAME="your-asg-name"
+LAUNCH_TEMPLATE_NAME="your-launch-template-name"
+ALB_NAME="your-alb-name"
+TARGET_GROUP_NAME="your-target-group-name"
+S3_BUCKET_NAME="your-s3-bucket-name"
+
+export AWS_DEFAULT_REGION=$AWS_REGION
+
+echo "Starting infrastructure teardown in $AWS_REGION..."
+
+# 1. Auto Scaling Group
+aws autoscaling update-auto-scaling-group \
+  --auto-scaling-group-name "$ASG_NAME" \
+  --min-size 0 --max-size 0 --desired-capacity 0 2>/dev/null || true
+aws autoscaling delete-auto-scaling-group \
+  --auto-scaling-group-name "$ASG_NAME" --force-delete 2>/dev/null || true
+
+# 2. Launch Template
+aws ec2 delete-launch-template \
+  --launch-template-name "$LAUNCH_TEMPLATE_NAME" 2>/dev/null || true
+
+# 3. Load Balancer + Target Group
+ALB_ARN=$(aws elbv2 describe-load-balancers --names "$ALB_NAME" \
+  --query "LoadBalancers[0].LoadBalancerArn" --output text 2>/dev/null || echo "")
+[ -n "$ALB_ARN" ] && [ "$ALB_ARN" != "None" ] && aws elbv2 delete-load-balancer --load-balancer-arn "$ALB_ARN"
+
+TG_ARN=$(aws elbv2 describe-target-groups --names "$TARGET_GROUP_NAME" \
+  --query "TargetGroups[0].TargetGroupArn" --output text 2>/dev/null || echo "")
+[ -n "$TG_ARN" ] && [ "$TG_ARN" != "None" ] && aws elbv2 delete-target-group --target-group-arn "$TG_ARN"
+
+# 4. S3 bucket
+aws s3 rm "s3://$S3_BUCKET_NAME" --recursive 2>/dev/null || true
+aws s3api delete-bucket --bucket "$S3_BUCKET_NAME" --region "$AWS_REGION" 2>/dev/null || true
+
+# 5. Security groups (dynamically discovered by naming convention)
+SECURITY_GROUP_IDS=($(aws ec2 describe-security-groups \
+  --filters "Name=group-name,Values=devops-project-01-*" \
+  --query "SecurityGroups[*].GroupId" --output text))
+for SG_ID in "${SECURITY_GROUP_IDS[@]}"; do
+  aws ec2 delete-security-group --group-id "$SG_ID" 2>/dev/null || \
+    echo "Could not delete $SG_ID yet — check for remaining dependencies."
+done
+
+echo "Teardown complete!"
 ```
 
-### 2. Log Management
-```bash
-# Configure CloudWatch agent
-cat << EOF > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
-{
-    "agent": {
-        "metrics_collection_interval": 60,
-        "run_as_user": "root"
-    },
-    "logs": {
-        "logs_collected": {
-            "files": {
-                "collect_list": [
-                    {
-                        "file_path": "/opt/tomcat/logs/catalina.out",
-                        "log_group_name": "/aws/tomcat/application",
-                        "log_stream_name": "{instance_id}",
-                        "timezone": "UTC"
-                    }
-                ]
-            }
-        }
-    },
-    "metrics": {
-        "metrics_collected": {
-            "mem": {
-                "measurement": [
-                    "mem_used_percent"
-                ]
-            },
-            "swap": {
-                "measurement": [
-                    "swap_used_percent"
-                ]
-            }
-        }
-    }
-}
-EOF
-```
+> Delete the Transit Gateway attachments/gateway and the two VPCs manually (or add matching CLI calls) since their exact IDs depend on your `.env` files — source `transit-gateway.env`, `primary-vpc.env`, and `secondary-vpc.env` at the top of the script to fill in the ARNs/IDs automatically instead of hardcoding them.
 
-# Security Best Practices
-
-## 1. Network Security
-- Implement network ACLs
-- Use security groups effectively
-- Enable VPC Flow Logs
-- Configure AWS WAF
-
-## 2. Application Security
-- Regular security patches
-- Implement AWS Shield
-- Use AWS Secrets Manager
-- Enable AWS GuardDuty
-
-## 3. Data Security
-- Enable encryption at rest
-- Use SSL/TLS for data in transit
-- Regular security audits
-- Implement backup strategies
-
-# Troubleshooting Guide
-
-## Common Issues and Solutions
-
-### 1. Connection Issues
-```bash
-# Check connectivity
-telnet database-endpoint 3306
-
-# Verify security group rules
-aws ec2 describe-security-groups --group-ids sg-xxx
-
-# Test load balancer health
-aws elbv2 describe-target-health --target-group-arn arn:aws:elasticloadbalancing:region:account-id:targetgroup/your-target-group/xxx
-```
-
-### 2. Performance Issues
-```bash
-# Check CPU usage
-top -bn1
-
-# Monitor memory usage
-free -m
-
-# Check disk usage
-df -h
-
-# Monitor Tomcat threads
-ps -eLf | grep java | wc -l
-```
-
-# Contributing
-
-## How to Contribute
-
-1. Fork the repository
-2. Create a feature branch
-3. Commit your changes
-4. Push to the branch
-5. Create a Pull Request
-
-## Development Setup
-
-```bash
-# Clone repository
-git clone https://github.com/yourusername/your-repo.git
-
-# Install dependencies
-mvn install
-
-# Run tests
-mvn test
-```
+### Verify teardown
+Check the **AWS Cost Explorer** or **Billing Dashboard** over the next 24 hours to confirm usage drops to $0, and confirm in the EC2/RDS/VPC consoles that instance, database, and load balancer counts are all at zero.
 
 ---
 
-## 🛠️ Author & Community
+## 📝 Notes
 
-This project is maintained by **[Harshhaa](https://github.com/NotHarshhaa)** 💡.
-Your feedback and contributions are welcome!
-
-📧 **Connect with me:**
-- **GitHub**: [@NotHarshhaa](https://github.com/NotHarshhaa)
-- **Blog**: [ProDevOpsGuy](https://blog.prodevopsguytech.com)
-- **Telegram Community**: [Join Here](https://t.me/prodevopsguy)
-- **LinkedIn**: [Harshhaa Vardhan Reddy](https://www.linkedin.com/in/harshhaa-vardhan-reddy/)
-
----
-
-## ⭐ Support the Project
-
-If you found this project helpful, please consider:
-- **Starring** ⭐ the repository
-- **Sharing** it with your network
-- **Contributing** to its improvement
-
-### 📢 Stay Connected
-
-![Follow Me](https://imgur.com/2j7GSPs.png)
-
+- Rebuilding the environment from scratch after a teardown just means re-running `01` through `09` in order, then re-running the Jenkins pipeline once the new `TOMCAT_ASG` name and `PUBLIC_NLB_DNS` are updated in the Jenkinsfile.
+- Keep `*.env` files out of version control if they ever contain sensitive account-specific identifiers — `.gitignore` them and regenerate on each provisioning run.
 > [!Important]
 > This documentation is continuously evolving. For the latest updates, please check the repository regularly.
