@@ -87,7 +87,9 @@ End-to-end DevOps pipeline that builds, scans, and deploys a Java (Spring Boot/T
 
 Two VPCs (primary and secondary) connected via a Transit Gateway, with a public-facing frontend tier, a private application tier running Tomcat behind an Auto Scaling Group, and an RDS database. Build artifacts are shipped through S3, and deployments are rolled out via ASG Instance Refresh.
 
-![DevOps Project 01 3D architecture diagram](./architecture-3d.svg)
+![DevOps Project 01 3D architecture diagram]
+
+<img width="217" height="150" alt="architecture-3d" src="https://github.com/user-attachments/assets/a004ec64-01bd-4000-bd8a-70d10f4ecc7f" />
 
 **Traffic flow:** Internet → Public NLB → NGINX (frontend tier) → Tomcat app tier (ASG) → RDS.
 **Deployment flow:** Jenkins builds the WAR → uploads it to S3 → triggers an ASG Instance Refresh → new instances pull the latest artifact on boot (via user-data) → Jenkins verifies the app responds with HTTP 200 through the NLB.
